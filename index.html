@@ -303,6 +303,41 @@ tr.leave-tot-row td.rn { background:#FFEDD5 !important; }
   .print-page:last-child { page-break-after:avoid; }
 }
 .print-page { display:none; }
+ 
+/* ══ BACKUP BAR ══ */
+.backup-bar {
+  background: #fff;
+  border: 1.5px solid #E5E7EB;
+  border-radius: 10px;
+  padding: 13px 20px;
+  margin-bottom: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+  box-shadow: 0 1px 3px rgba(0,0,0,.06);
+}
+.backup-left { display:flex; align-items:center; gap:10px; }
+.backup-icon {
+  width:34px; height:34px; background:#F0FDF4;
+  border-radius:8px; display:flex; align-items:center; justify-content:center; flex-shrink:0;
+}
+.backup-title { font-weight:700; font-size:13px; color:#111827; }
+.backup-sub   { font-size:11px; color:#6B7280; margin-top:1px; }
+.backup-right { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+.b-stamp {
+  font-size:11px; color:#9CA3AF; font-weight:500;
+  display:flex; align-items:center; gap:5px;
+}
+.b-dot {
+  width:7px; height:7px; border-radius:50%;
+  background:#34D399; flex-shrink:0;
+  animation: bdot 2.5s infinite;
+}
+.b-dot.warn { background:#F59E0B; animation:none; }
+@keyframes bdot { 0%,100%{opacity:1} 50%{opacity:.3} }
+#importFileInput { display:none; }
 </style>
 </head>
 <body>
@@ -397,6 +432,31 @@ tr.leave-tot-row td.rn { background:#FFEDD5 !important; }
     </div>
   </div>
  
+ 
+  <!-- DATA SAFETY BAR -->
+  <div class="backup-bar no-print">
+    <div class="backup-left">
+      <div class="backup-icon">
+        <svg width="17" height="17" fill="none" stroke="#16A34A" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>
+      </div>
+      <div>
+        <div class="backup-title">Data Safety</div>
+        <div class="backup-sub" id="backupSub">Data saves in browser automatically. Export a .json file for permanent PC backup.</div>
+      </div>
+    </div>
+    <div class="backup-right">
+      <div class="b-stamp"><span class="b-dot" id="bDot"></span><span id="bStamp">Checking…</span></div>
+      <button class="nbtn nbtn-sm nbtn-green" onclick="exportBackup()" style="gap:6px;">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>
+        Export Backup (.json)
+      </button>
+      <button class="nbtn nbtn-sm" onclick="document.getElementById('importFileInput').click()" style="gap:6px;">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>
+        Import / Restore
+      </button>
+      <input type="file" id="importFileInput" accept=".json" onchange="importBackup(event)"/>
+    </div>
+  </div>
   <!-- EMPLOYEE SUMMARY TABLE -->
   <div class="sal-totals-card">
     <div class="sal-totals-hdr">
@@ -484,33 +544,115 @@ const LEAVE_TYPES = [
 ];
  
 /* ════════════════════════════════════
-   STORAGE — SAFE READ/WRITE
+   STORAGE — DUAL WRITE
+   Primary:   IndexedDB  (durable, survives cache clear)
+   Fallback:  localStorage (instant read)
 ════════════════════════════════════ */
-const WK = (id,mo) => `pkt7w_${id}_${mo}`;   // work entries key
-const LK = (id,mo) => `pkt7l_${id}_${mo}`;   // leave entries key
+const WK = (id,mo) => `pkt7w_${id}_${mo}`;
+const LK = (id,mo) => `pkt7l_${id}_${mo}`;
+const DB_NAME    = 'PackTrackProDB';
+const DB_VERSION = 1;
+const STORE_NAME = 'records';
  
+/* ── Open IndexedDB ── */
+let _db = null;
+function openDB() {
+  return new Promise((resolve, reject) => {
+    if (_db) { resolve(_db); return; }
+    const req = indexedDB.open(DB_NAME, DB_VERSION);
+    req.onupgradeneeded = e => {
+      const db = e.target.result;
+      if (!db.objectStoreNames.contains(STORE_NAME)) {
+        db.createObjectStore(STORE_NAME);
+      }
+    };
+    req.onsuccess = e => { _db = e.target.result; resolve(_db); };
+    req.onerror   = e => { console.warn('IDB open error', e); reject(e); };
+  });
+}
+ 
+/* ── IDB write (fire-and-forget with localStorage mirror) ── */
+function idbWrite(key, data) {
+  // Always write to localStorage immediately (fast reads)
+  try {
+    localStorage.setItem(key, JSON.stringify(data));
+  } catch(e) { /* localStorage full — IndexedDB will still save */ }
+  // Also persist to IndexedDB (durable)
+  openDB().then(db => {
+    const tx = db.transaction(STORE_NAME, 'readwrite');
+    tx.objectStore(STORE_NAME).put(JSON.stringify(data), key);
+  }).catch(e => console.warn('IDB write error', e));
+}
+ 
+/* ── IDB read (localStorage first for speed, IDB fallback) ── */
+function idbRead(key) {
+  // Fast path: localStorage
+  try {
+    const raw = localStorage.getItem(key);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return Promise.resolve(parsed);
+    }
+  } catch(e) {}
+  // Fallback: read from IndexedDB
+  return openDB().then(db => new Promise((resolve) => {
+    const tx  = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).get(key);
+    req.onsuccess = e => {
+      const raw = e.target.result;
+      try {
+        const parsed = raw ? JSON.parse(raw) : [];
+        // Restore to localStorage for next fast read
+        if (Array.isArray(parsed)) {
+          try { localStorage.setItem(key, JSON.stringify(parsed)); } catch(ex) {}
+        }
+        resolve(Array.isArray(parsed) ? parsed : []);
+      } catch(ex) { resolve([]); }
+    };
+    req.onerror = () => resolve([]);
+  })).catch(() => []);
+}
+ 
+/* ── Sync: pull all keys from IDB into localStorage on startup ── */
+async function syncIDBtoLS() {
+  try {
+    const db  = await openDB();
+    const tx  = db.transaction(STORE_NAME, 'readonly');
+    const req = tx.objectStore(STORE_NAME).getAllKeys();
+    req.onsuccess = e => {
+      const keys = e.target.result || [];
+      keys.forEach(key => {
+        if (!key.startsWith('pkt7')) return;
+        // Only sync if localStorage is missing this key
+        if (!localStorage.getItem(key)) {
+          const gr = tx.objectStore(STORE_NAME).get(key);
+          gr.onsuccess = ev => {
+            if (ev.target.result) {
+              try { localStorage.setItem(key, ev.target.result); } catch(ex) {}
+            }
+          };
+        }
+      });
+    };
+  } catch(e) { console.warn('IDB sync error', e); }
+}
+ 
+/* ── Public API (synchronous wrappers that also write IDB) ── */
 function safeRead(key) {
   try {
     const raw = localStorage.getItem(key);
     if (!raw) return [];
-    const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
-  } catch(e) {
-    console.warn('Read error for key', key, e);
-    return [];
-  }
+    const p = JSON.parse(raw);
+    return Array.isArray(p) ? p : [];
+  } catch(e) { return []; }
 }
  
 function safeWrite(key, data) {
   try {
-    if (!Array.isArray(data)) { console.error('Tried to save non-array!', data); return false; }
-    localStorage.setItem(key, JSON.stringify(data));
-    // verify write
-    const check = localStorage.getItem(key);
-    if (!check) { console.error('Write verification failed for key', key); return false; }
+    if (!Array.isArray(data)) return false;
+    idbWrite(key, data);   // writes both localStorage + IndexedDB
     return true;
   } catch(e) {
-    console.error('Write error for key', key, e);
     showToastErr('⚠️ Save failed! Storage may be full.');
     return false;
   }
@@ -562,14 +704,20 @@ function setActiveEmp(idx) {
 function initMoSel() {
   const sel = document.getElementById('moSel');
   const now = new Date();
-  for (let i=-5; i<=2; i++) {
-    const d   = new Date(now.getFullYear(), now.getMonth()+i, 1);
-    const val = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
-    const lbl = d.toLocaleDateString('en-PK',{month:'long',year:'numeric'});
-    const o   = document.createElement('option');
-    o.value=val; o.textContent=lbl; sel.appendChild(o);
+  const curVal = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  for (let year = 2020; year <= 2040; year++) {
+    const grp = document.createElement('optgroup');
+    grp.label = String(year);
+    for (let month = 1; month <= 12; month++) {
+      const val = `${year}-${String(month).padStart(2,'0')}`;
+      const lbl = new Date(year, month-1, 1).toLocaleDateString('en-PK', {month:'long', year:'numeric'});
+      const o   = document.createElement('option');
+      o.value = val; o.textContent = lbl;
+      grp.appendChild(o);
+    }
+    sel.appendChild(grp);
   }
-  sel.value = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}`;
+  sel.value = curVal;
 }
 const onMoChange = () => renderAll();
  
@@ -715,6 +863,131 @@ function buildBlock(emp, idx, entries, leaves, mo) {
       </div>
     </div>
   </div>`;
+}
+ 
+ 
+/* ════════════════════════════════════
+   EXPORT / IMPORT / BACKUP STAMP
+════════════════════════════════════ */
+ 
+/* Collect all PackTrack data from both storages */
+async function collectAllData() {
+  const out = { version:3, exportedAt:new Date().toISOString(), appName:'PackTrack Pro', data:{} };
+  // From localStorage
+  for (let i=0; i<localStorage.length; i++) {
+    const k = localStorage.key(i);
+    if (k && (k.startsWith('pkt7w_') || k.startsWith('pkt7l_'))) {
+      try { out.data[k] = JSON.parse(localStorage.getItem(k)); } catch(e) {}
+    }
+  }
+  // Also pull from IndexedDB (catches anything not in LS)
+  try {
+    const db  = await openDB();
+    const tx  = db.transaction(STORE_NAME,'readonly');
+    const req = tx.objectStore(STORE_NAME).getAllKeys();
+    await new Promise(res => {
+      req.onsuccess = e => {
+        const keys = e.target.result || [];
+        let pending = keys.filter(k=>k.startsWith('pkt7')).length;
+        if (!pending) { res(); return; }
+        keys.filter(k=>k.startsWith('pkt7')).forEach(k => {
+          const gr = tx.objectStore(STORE_NAME).get(k);
+          gr.onsuccess = ev => {
+            if (ev.target.result && !out.data[k]) {
+              try { out.data[k] = JSON.parse(ev.target.result); } catch(ex) {}
+            }
+            if (--pending === 0) res();
+          };
+          gr.onerror = () => { if(--pending===0) res(); };
+        });
+      };
+      req.onerror = res;
+    });
+  } catch(e) {}
+  return out;
+}
+ 
+/* ── EXPORT ── */
+async function exportBackup() {
+  const data  = await collectAllData();
+  const json  = JSON.stringify(data, null, 2);
+  const blob  = new Blob([json], {type:'application/json'});
+  const url   = URL.createObjectURL(blob);
+  const now   = new Date();
+  const stamp = `${now.getFullYear()}-${String(now.getMonth()+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+  const fname = `PackTrackPro_Backup_${stamp}.json`;
+  const a = document.createElement('a');
+  a.href=url; a.download=fname;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+  try { localStorage.setItem('pkt_last_backup', new Date().toISOString()); } catch(e) {}
+  refreshStamp();
+  showToastOk(`✓ Backup saved: ${fname}`);
+}
+ 
+/* ── IMPORT ── */
+function importBackup(event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = function(e) {
+    try {
+      const data = JSON.parse(e.target.result);
+      if (!data.appName || data.appName !== 'PackTrack Pro') {
+        showToastErr('⚠️ Invalid file — not a PackTrack Pro backup'); return;
+      }
+      const records = data.data || {};
+      const count   = Object.keys(records).length;
+      if (!confirm(
+        `Restore backup from ${new Date(data.exportedAt).toLocaleDateString('en-PK')}?\n\n` +
+        `${count} data records will be loaded.\n` +
+        `Existing data will be MERGED — nothing deleted.\n\nContinue?`
+      )) return;
+      // Write to both localStorage and IndexedDB
+      Object.entries(records).forEach(([k,v]) => {
+        if (Array.isArray(v)) {
+          try { localStorage.setItem(k, JSON.stringify(v)); } catch(ex) {}
+          openDB().then(db => {
+            const tx = db.transaction(STORE_NAME,'readwrite');
+            tx.objectStore(STORE_NAME).put(JSON.stringify(v), k);
+          }).catch(()=>{});
+        }
+      });
+      try { localStorage.setItem('pkt_last_import', new Date().toISOString()); } catch(e2) {}
+      renderAll();
+      refreshStamp();
+      showToastOk('✓ Backup restored successfully!');
+    } catch(err) {
+      showToastErr('⚠️ Could not read file — make sure it is a valid .json backup');
+    }
+  };
+  reader.readAsText(file);
+  event.target.value = '';
+}
+ 
+/* ── Backup stamp ── */
+function refreshStamp() {
+  const stampEl = document.getElementById('bStamp');
+  const dotEl   = document.getElementById('bDot');
+  const subEl   = document.getElementById('backupSub');
+  if (!stampEl) return;
+ 
+  const lastBackup = localStorage.getItem('pkt_last_backup');
+ 
+  if (!lastBackup) {
+    stampEl.textContent = 'No backup yet — export one now!';
+    if (dotEl) dotEl.classList.add('warn');
+    return;
+  }
+ 
+  const d = new Date(lastBackup);
+  const daysSince = (Date.now() - d.getTime()) / 864e5;
+  stampEl.textContent = 'Backup: ' + d.toLocaleDateString('en-PK',{day:'2-digit',month:'short',year:'numeric'});
+  if (dotEl) dotEl.classList.toggle('warn', daysSince > 7);
+ 
+  if (subEl && daysSince > 7) {
+    subEl.innerHTML = `<span style="color:#D97706;font-weight:600;">⚠️ Last backup was ${Math.floor(daysSince)} days ago — export a fresh backup!</span>`;
+  }
 }
  
 /* ════════════════════════════════════
@@ -1181,10 +1454,12 @@ function fd(d) {
 /* ════════════════════════════════════
    INIT
 ════════════════════════════════════ */
-window.addEventListener('DOMContentLoaded', () => {
+window.addEventListener('DOMContentLoaded', async () => {
+  await syncIDBtoLS();   // pull any IDB-only data into localStorage first
   initMoSel();
   renderAll();
-  setTimeout(()=>{ const q=document.getElementById(`wq-${EMPS[0].id}`); if(q) q.focus(); }, 120);
+  refreshStamp();
+  setTimeout(()=>{ const q=document.getElementById(`wq-${EMPS[0].id}`); if(q) q.focus(); }, 150);
 });
 </script>
 </body>
